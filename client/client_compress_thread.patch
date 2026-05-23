@@ -1,0 +1,264 @@
+Index: client_compress_thread.c
+===================================================================
+--- client_compress_thread.c	(revision 273)
++++ client_compress_thread.c	(working copy)
+@@ -7,6 +7,15 @@
+ #include <string.h>
+ #include <errno.h>
+ #include <zstd.h>
++
++#include "skyfs_sys.h"
++#include "skyfs_list.h"
++#include "skyfs_const.h"
++#include "skyfs_types.h"
++
++
++#include "skyfs_fs.h"
++#include "skyfs_debug.h"
+ #include "client_compress_thread.h"
+ 
+ #define COMP_NUM_THREADS (64)
+@@ -26,6 +35,9 @@
+ compress_task_t  comp_tasks[COMP_NUM_THREADS];
+ 
+ 
++extern void do_pre_split_p_v0(double * data, size_t num_doubles , uint8_t * lanes, size_t start_index, size_t len);
++extern void do_post_merge_v0( uint8_t * lanes, size_t num_doubles, double * ori_data);
++
+ pthread_mutex_t * get_dev_mutex(int dev_idx)
+ {
+ 	int delta = random();
+@@ -76,6 +88,8 @@
+    int op_type = 0;
+    char * compress_ptr = NULL;
+    char * uncompress_ptr = NULL;
++   size_t start_offset = 0;
++	
+ 
+ 
+     while (1) {
+@@ -90,10 +104,15 @@
+ 
+         //printf("Thread %ld executing task\n", (long)arg);
+         // 模拟任务执行时间
+-	if(op_type == 0 || op_type != 0x01){
++	if(op_type == 0 || (op_type != 0x01 && op_type != 0x10000001)){
+         	usleep(50);
+ 	}else{
+ 		// do comprss for all blks in this task one by one
++		
++		
++		int wait_prop = this_task->need_prop & 0x01;
++		//int idx = 0;
++		int do_prop = this_task->need_prop & 0x10;
+ 		compress_ptr = this_task->compress_buf;
+ 		uncompress_ptr = this_task->uncompress_buf;
+ 		compressed_blk_cnt = 0;
+@@ -100,22 +119,86 @@
+ 		size_t compress_ret_len = 0;
+ 		size_t compress_len = this_task->compress_blk_size;
+ 		size_t uncompress_len = this_task->uncompress_blk_size;
+-
++		uint8_t * real_uncompress_ptr = NULL;
++                SKYFS_ERROR_1("start_compress : start compress, optype %d\n ", op_type);
++		start_offset = this_task->start_offset;
++		if(wait_prop){
++		   do_pre_split_p_v0((double *)this_task->uncompress_buf, (this_task->ori_size)/sizeof(double), 
++			(uint8_t*)(this_task->prop_buf), start_offset/sizeof(double),
++			uncompress_len * this_task->blk_cnt/sizeof(double) );
++		   	this_task->need_prop =  0x10;
++			SKYFS_ERROR("DO prop : data %p , num_doubles %lu, prop_buf %p , start_double_idx %lu, this_num_doubles %lu \n",
++					 this_task->uncompress_buf, (this_task->ori_size)/sizeof(double),
++					 this_task->prop_buf,  start_offset/sizeof(double), uncompress_len * this_task->blk_cnt/sizeof(double));
++		   goto end_prop;
++		}
+ 		//fprintf(stderr, "start  to run task_id   %d, op %d\n", task_idx, op_type);
+ 		while(compressed_blk_cnt < this_task->blk_cnt){
++			real_uncompress_ptr = uncompress_ptr;
++			
++			if(do_prop){
++				// TODO: mayl, uncompress_ptr is not right!!
++				//do_pre_split_p_v0((double *)this_task->ori_uncompress_buf, this_task->ori_size/sizeof(double), 
++				//	(uint8_t*)(this_task->prop_buf), start_offset,uncompress_len  );
++				real_uncompress_ptr = &this_task->prop_buf[start_offset];
++				//start_offset += uncompress_len;
++			}
+ 			this_task->compressed_chunk_sizes[compressed_blk_cnt] = 0;
+-			compress_ret_len = ZSTD_compress(compress_ptr, compress_len, 
+-					uncompress_ptr, uncompress_len, 2);
++			if(op_type & 0x10000000){
++#if 1
++				// now do decompress according to optype
++				compress_len = this_task->compress_data_sizes[compressed_blk_cnt];
++				if(compress_len >= SKYFS_OBJECT_NODE_SIZE){
++					memcpy(real_uncompress_ptr, compress_ptr, SKYFS_OBJECT_NODE_SIZE );						
++				}else{
++					// this is the max compressed len
++					//uncompress_len  = SKYFS_OBJECT_NODE_SIZE;
++					//uncompress_len = this_task->compress_sizes[]; // TODO: set the compress_sizes
++					//uncompres_len here is compress len !!, need to set by caller
++					compress_ret_len = ZSTD_decompress(real_uncompress_ptr, uncompress_len,
++                                        compress_ptr, compress_len); 
++				}
++#endif
++				
++			}else{
++				// now do compress according to optype
++				compress_ret_len = ZSTD_compress(compress_ptr, compress_len, 
++					real_uncompress_ptr, uncompress_len, 2);
++			}
++
+ 			if(ZSTD_isError(compress_ret_len)){
+         			fprintf(stderr, "Compression error: %s\n", ZSTD_getErrorName(compress_len));
+ 				break;
+ 			}
++                        if(compress_ret_len >= uncompress_len && (op_type & 0x10000000 ==0)){
++				SKYFS_ERROR_1("get CPU ccmpress data bigger than original data, %lu, %lu  \n", compress_ret_len , uncompress_len);
++                                compress_ret_len = uncompress_len;
++                                // copy original data 
++                                memcpy(compress_ptr,  real_uncompress_ptr, compress_ret_len);  
++			}
++			SKYFS_ERROR("zstd_compress , uncomp buf %p , uncmp_len %lu, comp_len %lu, start_offset %lu \n", 
++				real_uncompress_ptr,  uncompress_len,  compress_ret_len, start_offset);
+ 			this_task->compressed_chunk_sizes[compressed_blk_cnt] = compress_ret_len;
++			// for decompress
++			this_task->uncompressed_chunk_sizes[compressed_blk_cnt] = compress_ret_len;
++			
+ 			this_task->compress_buf_ptrs[compressed_blk_cnt] = compress_ptr;
+ 
+ 			compressed_blk_cnt++;
++
++			//if(op_type & 0x10000000 ==0){
+ 			uncompress_ptr += uncompress_len;
+-			compress_ptr += compress_len;
++			//}else{
++				// TODO
++			//}
++			if(do_prop){
++			      start_offset += uncompress_len;
++			}
++			//if(op_type & 0x10000000 ==0){
++				
++			//}else{
++			     compress_ptr += compress_len;
++			//}
+ 
+ 		}
+ 		this_task->complete_blks = compressed_blk_cnt;
+@@ -125,6 +208,7 @@
+ 
+ 	}
+         //printf("Thread %ld finished task\n", (long)arg);
++end_prop:
+         // 触发完成信号量
+         sem_post(&done_sem[task_idx]);
+     }
+@@ -132,6 +216,8 @@
+ }
+ 
+ 
++
++
+ void init_compress_worker_threads()
+ {
+ 	// 初始化 信号量数组
+@@ -177,6 +263,7 @@
+ 	int x = 0;
+ 	int rc = 0;
+ 	int complete_tasks = 0;
++	size_t start_offset = 0;
+ 	
+ 
+ 	if(tasks_per_thread == 0){
+@@ -194,12 +281,15 @@
+ 	uncompress_ptr = comp_task->uncompress_buf;
+ 	//compress_sizes_ptr = comp_task->compressed_chunk_sizes;
+ 
++
++	//int buf_idx = 0;
+ 	while(total_tasks > 0){
+ 
+ 		curr_task = &comp_tasks[start_worker_id+n];
+ 		curr_task->task_idx = start_worker_id+n;
+ 		curr_task->ino = comp_task->ino;
+-		curr_task->buf_idx = comp_task->buf_idx;
++		curr_task->buf_idx = x;
++		curr_task->compress_data_sizes = comp_task-> compress_data_sizes;
+ 
+ 		if(total_tasks >=  tasks_per_thread)
+ 			curr_task->blk_cnt =  tasks_per_thread;
+@@ -217,12 +307,24 @@
+ 		curr_task->compressed_chunk_sizes = &(comp_task->compressed_chunk_sizes[x]);
+ 		curr_task->compress_buf_ptrs = &(comp_task->compress_buf_ptrs[x]);
+ 
++                
++		curr_task->uncompressed_chunk_sizes = &(comp_task->uncompressed_chunk_sizes[x]);
+ 
++
+ 		curr_task->compress_buf = compress_ptr;
+ 		curr_task->uncompress_buf = uncompress_ptr;
++		curr_task->prop_buf = comp_task->prop_buf;
++		curr_task->ori_size = comp_task->ori_size;
++		if(comp_task->need_prop)
++			curr_task->need_prop = comp_task->need_prop ;
++		curr_task->ori_uncompress_buf = comp_task->uncompress_buf;
++		curr_task->start_offset = start_offset;
+ 		
+ 		compress_ptr += (curr_task->compress_blk_size * curr_task->blk_cnt);
+ 		uncompress_ptr += (curr_task->uncompress_blk_size * curr_task->blk_cnt);
++		
++		start_offset  += (curr_task->uncompress_blk_size * curr_task->blk_cnt);
++		
+ 		total_tasks -= curr_task->blk_cnt;
+ 		x += curr_task->blk_cnt;
+ 
+@@ -230,8 +332,18 @@
+ 
+ 
+ 	}
++	// do_prop:
++	
+ 	//fprintf(stderr, "send semphores to group , start by %d\n", start_worker_id);
+ 	// 3 触发启动信号量
++	int wait_prop = comp_task->need_prop;
++	if(wait_prop){
++		SKYFS_ERROR("DO_prop doubles %lu\n", (comp_task->ori_size)/sizeof(double));
++		 do_pre_split_p_v0((double *)comp_task->uncompress_buf, (comp_task->ori_size)/sizeof(double),
++                        (uint8_t*)(comp_task->prop_buf), 0,
++                        comp_task->ori_size/sizeof(double) );
++
++	}
+ 	for(int i = 0; i<n; i++){
+         	sem_post(&task_sem[start_worker_id]+i);
+ 	}
+@@ -240,9 +352,29 @@
+ 	for(int j = 0; j<n; j++){
+         	sem_wait(&done_sem[start_worker_id]+j);
+ 		curr_task = &comp_tasks[start_worker_id+j];
+-		rc += curr_task->complete_blks;
++		//if(!wait_prop)
++			rc += curr_task->complete_blks;
+ 	}
++	/*
++	if(wait_prop){
++	    wait_prop = 0;
++	    for(int i = 0; i<n; i++){
++		
++                curr_task = &comp_tasks[start_worker_id+i];
++		curr_task->need_prop = 0x10;
++                sem_post(&task_sem[start_worker_id]+i);
++            }
++	    for(int j = 0; j<n; j++){
++                sem_wait(&done_sem[start_worker_id]+j);
++                curr_task = &comp_tasks[start_worker_id+j];
++                //if(!wait_prop)
++                rc += curr_task->complete_blks;
++           }
+ 
++
++	}*/
++	
++
+ 	//fprintf(stderr, "wait semphores to group , start by %d, Done\n", start_worker_id);
+ 	// 释放工作组锁
+ 	pthread_mutex_unlock(&(compress_task_mutex_locks[work_group_id]));

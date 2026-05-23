@@ -1,0 +1,39 @@
+# 编译器和链接器设置
+# cd /home/mayili/SZ3-master/build/tools/sz3c/CMakeFiles/SZ3c.dir
+CXX = /opt/gcc-11/bin/g++
+CXX_DEFINES = -DSZ3_DEBUG_TIMINGS=0 -DSZ3c_EXPORTS
+
+CXX_INCLUDES = -I/home/mayili/SZ3-master/tools/sz3c/include -I/home/mayili//SZ3-master/include -I/home/mayili//SZ3-master/build/include
+
+CXX_FLAGS =  -Wno-sign-compare -Wno-unused-parameter -Wsuggest-override -Wold-style-cast -Wcast-qual -Wzero-as-null-pointer-constant -Wextra-semi -Wnon-virtual-dtor -Wcast-align -Wunused-variable -O3 -DNDEBUG -fPIC -fopenmp
+
+#CXXFLAGS = -fPIC -Wall -O2 -std=c++11
+LDFLAGS = -shared
+ 
+# 源文件和目标文件列表
+#SOURCES = main.cpp helper.cpp
+#OBJECTS = $(SOURCES:.cpp=.o)
+OBJECTS = src/sz3c.cpp.o
+TARGET =  libSZ3c.so
+
+
+   
+# 默认目标 生成.o 文件
+all:	$(TARGET) 
+	
+$(TARGET): 
+#	构建 sz3c.cpp.o
+	cd /home/mayili//SZ3-master/build/tools/sz3c && $(CXX)  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT tools/sz3c/CMakeFiles/SZ3c.dir/src/sz3c.cpp.o -MF CMakeFiles/SZ3c.dir/src/sz3c.cpp.o.d -o CMakeFiles/SZ3c.dir/src/sz3c.cpp.o -c /home/mayili/SZ3-master/tools/sz3c/src/sz3c.cpp 
+
+	cp $(OBJECTS) sz3c.cpp.o
+	ls -l
+
+	/opt/gcc-11/bin/c++ -fPIC  -Wno-sign-compare -Wno-unused-parameter -Wsuggest-override -Wold-style-cast -Wcast-qual -Wzero-as-null-pointer-constant -Wextra-semi -Wnon-virtual-dtor -Wcast-align -Wunused-variable -O3 -DNDEBUG -shared -Wl,-soname,libSZ3c.so -o libSZ3c.so sz3c.cpp.o  /opt/gcc-11/lib64/libgomp.so  /usr/lib64/libpthread.so /usr/lib64/libzstd.so
+ 
+# 编译 .cpp 文件为 .o 文件
+#%.o: %.cpp
+ #   $(CXX) $(CXXFLAGS) -c $< -o $@
+ 
+# 清理构建产物
+#clean:
+ #   rm -f $(OBJECTS) $(TARGET)

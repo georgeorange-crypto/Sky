@@ -1,0 +1,74 @@
+Index: client_compress_thread.c
+===================================================================
+--- client_compress_thread.c	(revision 273)
++++ client_compress_thread.c	(working copy)
+@@ -25,7 +25,11 @@
+ pthread_mutex_t gcompress_task_mutex_locks[GCOMP_NUM_TASKS];// 最大并发任务锁数组
+ compress_task_t  comp_tasks[COMP_NUM_THREADS];
+ 
++int do_prop = 1;
+ 
++extern void do_pre_split_p_v0(double * data, size_t num_doubles , uint8_t * lanes, size_t start_index, size_t len);
++extern void do_post_merge_v0( uint8_t * lanes, size_t num_doubles, double * ori_data);
++
+ pthread_mutex_t * get_dev_mutex(int dev_idx)
+ {
+ 	int delta = random();
+@@ -76,6 +80,8 @@
+    int op_type = 0;
+    char * compress_ptr = NULL;
+    char * uncompress_ptr = NULL;
++   size_t start_offset = 0;
++	
+ 
+ 
+     while (1) {
+@@ -100,12 +106,23 @@
+ 		size_t compress_ret_len = 0;
+ 		size_t compress_len = this_task->compress_blk_size;
+ 		size_t uncompress_len = this_task->uncompress_blk_size;
++		uint8_t * real_uncompress_ptr = NULL;
++		start_offset = this_task->start_offset;
+ 
+ 		//fprintf(stderr, "start  to run task_id   %d, op %d\n", task_idx, op_type);
+ 		while(compressed_blk_cnt < this_task->blk_cnt){
++			real_uncompress_ptr = uncompress_ptr;
++			if(do_prop){
++				// TODO: mayl, uncompress_ptr is not right!!
++				do_pre_split_p_v0((double *)this_task->ori_uncompress_buf, uncompress_len/sizeof(double), 
++					(uint8_t*)(this_task->prop_buf), start_offset,uncompress_len  );
++				real_uncompress_ptr = &this_task->prop_buf[start_offset];
++				start_offset += uncompress_len;
++			}
+ 			this_task->compressed_chunk_sizes[compressed_blk_cnt] = 0;
+ 			compress_ret_len = ZSTD_compress(compress_ptr, compress_len, 
+-					uncompress_ptr, uncompress_len, 2);
++					real_uncompress_ptr, uncompress_len, 2);
++
+ 			if(ZSTD_isError(compress_ret_len)){
+         			fprintf(stderr, "Compression error: %s\n", ZSTD_getErrorName(compress_len));
+ 				break;
+@@ -177,6 +194,7 @@
+ 	int x = 0;
+ 	int rc = 0;
+ 	int complete_tasks = 0;
++	size_t start_offset = 0;
+ 	
+ 
+ 	if(tasks_per_thread == 0){
+@@ -220,9 +238,15 @@
+ 
+ 		curr_task->compress_buf = compress_ptr;
+ 		curr_task->uncompress_buf = uncompress_ptr;
++		curr_task->prop_buf = comp_task->prop_buf;
++		curr_task->ori_uncompress_buf = comp_task->uncompress_buf;
++		curr_task->start_offset = start_offset;
+ 		
+ 		compress_ptr += (curr_task->compress_blk_size * curr_task->blk_cnt);
+ 		uncompress_ptr += (curr_task->uncompress_blk_size * curr_task->blk_cnt);
++		
++		start_offset  += (curr_task->uncompress_blk_size * curr_task->blk_cnt);
++		
+ 		total_tasks -= curr_task->blk_cnt;
+ 		x += curr_task->blk_cnt;
+ 

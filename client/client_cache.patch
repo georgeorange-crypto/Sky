@@ -1,0 +1,109 @@
+Index: client_cache.c
+===================================================================
+--- client_cache.c	(revision 268)
++++ client_cache.c	(working copy)
+@@ -59,6 +59,13 @@
+ 
+ //static uint64_t gpu_comp_time = 0;
+ 
++extern int lock_gpu_comp_task(int gtask_num);
++extern void unlock_gpu_comp_task(int gtask_index);
++
++
++extern void lock_gpu_init_task(int gtask_num);
++extern void unlock_gpu_init_task(int gtask_index);
++
+ int all_gpu_comp_ratio = 500;
+ static uint64_t gpu_comp_cnt = 0;
+ uint64_t gpu_comp_init_time = 0;
+@@ -1792,6 +1799,7 @@
+ 		skyfs_u32_t count, char * databuf, int comp_type, int64_t * changed_space)
+ {
+ 	int rc = 0;
++	char * d_temp = NULL;
+ 	uint64_t total_rc = 0;
+ 	int found_buffer = 0;
+         skyfs_C_gcompbuf_unit_t * tmp;
+@@ -1883,6 +1891,8 @@
+ 
+ 				struct timeval t3, t4;
+ 				uint64_t Gpu_comp_time = 0;
++				int Gpu_task_index = 0;
++				int Gpu_task_num = ((int)random())%64;
+ 
+ 				
+ 				char *  cpu_comp_buf_ptr[SKYFS_GPU_COMPRESS_BUF_SIZE /SKYFS_OBJECT_NODE_SIZE];
+@@ -1890,14 +1900,23 @@
+ 
+ 				// TODO: only changed here , just for test , will be changed back by mayl
+ 				//tmp->gpu_comp_ratio = 1000;
+-				if(((tmp->comp_op_count % 20)==0)&& tmp->comp_op_count >= 20){
++				if(((tmp->comp_op_count % 10)==0)&& (tmp->comp_op_count >= 10)){
+ 					adjust_comp_ratio(tmp);
+ 					
+ 				}
+ 
+ 			
++				// mayl: TODO do sharpening 
+ 
+-				if(random()%1000> tmp->gpu_comp_ratio){
++				if(tmp->gpu_comp_ratio <= 250){
++					tmp->gpu_comp_ratio = tmp->gpu_comp_ratio/500;
++				}else if(tmp->gpu_comp_ratio >=800){
++					//tmp->gpu_comp_ratio = (998+tmp->gpu_comp_ratio/500);
++				}
++				if(tmp->gpu_comp_ratio <=0){
++					tmp->gpu_comp_ratio = 1;
++				}
++				if(((int)(random()%1000))> tmp->gpu_comp_ratio){
+ 
+ 
+ 					
+@@ -1943,6 +1962,8 @@
+ 				SKYFS_ERROR("start client submit gpu compress  ino %llu write buf , i= %d, offset %llu, count %llu, last rc %llu, sizes_ptr %p \n", 
+ 						tmp->ino,match,   tmp->bufs[match].start,  SKYFS_OBJECT_NODE_SIZE, rc , sizes_ptr);
+ 				gettimeofday(&t1, NULL);
++
++				//Gpu_task_index = lock_gpu_comp_task(Gpu_task_num);
+ 				rc = __skyfs_C2O_gpu_compress_bufs(comp_type, 
+ 						&tmp->bufs[match],
+ 						tmp->bufs[match].buf, 
+@@ -1951,6 +1972,9 @@
+ 					       	&sizes_ptr,
+ 						&comp_bufs_ptrs
+ 						);
++
++				//unlock_gpu_comp_task(Gpu_task_index);
++
+ 				gettimeofday(&t2, NULL);
+ 				Gpu_comp_time += (t2.tv_sec*1000000 + t2.tv_usec);
+ 				Gpu_comp_time -= (t1.tv_sec*1000000 + t1.tv_usec);
+@@ -2224,12 +2248,26 @@
+ 		// set dev_id for all 2 bufs, because other comp_buf_parameters is set to zero by calloc
+ 		for (int n = 0 ; n< 2; n++){
+ 			new_compbuf->bufs[n].dev_id = (new_compbuf->ino+n) % 2;
++			int dev_idx =  new_compbuf->bufs[n].dev_id;
++			char * d_temp_ptr = NULL;
++ 			select_cuda_device(new_compbuf->bufs[n].dev_id);
++
++			lock_gpu_init_task(dev_idx);
+ 			// important !! select cuda device and create streams 
+- 			select_cuda_device(new_compbuf->bufs[n].dev_id);
+-			create_cuda_streams(new_compbuf->bufs[n].dev_streams, 2);
+ 			new_compbuf->bufs[n].d_size = get_nvcomp_zstd_temp_size();
++			/*
++			alloc_cuda_memory(d_temp_ptr,  new_compbuf->bufs[n].d_size);
++			if(d_temp_ptr != NULL){
++				SKYFS_ERROR_1("Init alloc d_temp %p \n", d_temp_ptr);
++				 new_compbuf->bufs[n].d_temp = d_temp_ptr;
++			}else{
++				SKYFS_ERROR_1("Init alloc d_temp failed !\n");
++			}*/
+ 
++			create_cuda_streams(new_compbuf->bufs[n].dev_streams, 2);
++			unlock_gpu_init_task(dev_idx);
+ 
++
+ 		}
+ 		rc = register_host_data((void*)new_compbuf, sizeof(skyfs_C_gcompbuf_unit_t));
+ 		gettimeofday(&t2,NULL);

@@ -1,0 +1,13 @@
+Index: client_cache.h
+===================================================================
+--- client_cache.h	(revision 267)
++++ client_cache.h	(working copy)
+@@ -126,7 +126,7 @@
+     skyfs_u64_t	     cpu_comp_time ; // in us
+     skyfs_u64_t	     cpu_comp_bytes ; 
+     skyfs_u64_t	     comp_op_count ; 
+-
++    skyfs_u64_t	     total_compressed_bytes;
+     //skyfs_u32_t		 conflict_index;
+     skyfs_C_gcompbuf_t bufs[2]; // reserve 2x16 MB for each FILE
+     pthread_rwlock_t rw_lock;

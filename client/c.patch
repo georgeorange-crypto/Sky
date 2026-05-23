@@ -1,0 +1,198 @@
+Index: client_cache.c
+===================================================================
+--- client_cache.c	(revision 267)
++++ client_cache.c	(working copy)
+@@ -58,6 +58,8 @@
+ 
+ 
+ //static uint64_t gpu_comp_time = 0;
++
++int all_gpu_comp_ratio = 500;
+ static uint64_t gpu_comp_cnt = 0;
+ uint64_t gpu_comp_init_time = 0;
+ 
+@@ -69,6 +71,7 @@
+ 
+ static uint64_t gpu_comp_submit_time = 0;
+ static uint64_t gpu_comp_submit_cnt = 0;
++static uint64_t total_compressed_bytes= 0;
+ 
+ static size_t gpu_write_buf_size = (size_t)(SKYFS_GPU_COMPRESS_BUF_SIZE);
+ static int gpu_compress = 0;
+@@ -86,8 +89,15 @@
+ 
+ void stat_gpu_cpu_compress()
+ {
+-	SKYFS_ERROR_1("Total compress_time: %lu us, compress_bytes %lu \n", 
+-			(gpu_compress_time+cpu_compress_time),(gpu_compress_bytes+cpu_compress_bytes));
++	float compress_rate = 1.0;
++	float gpu_cr_bw = 0.0;
++	float cpu_cr_bw = 0.0;
++	float all_cr_bw = 0.0;
++	float gpu_weight = 0.0;
++
++
++	SKYFS_ERROR_1("Total compress_time: %lu us, ori compress_bytes %lu , total compressed bytes %lu  \n", 
++			(gpu_compress_time+cpu_compress_time),(gpu_compress_bytes+cpu_compress_bytes),total_compressed_bytes);
+ 	
+ 	SKYFS_ERROR_1("Gpu compress_time: %lu us, compress_bytes %lu \n", 
+ 			(gpu_compress_time),(gpu_compress_bytes));
+@@ -94,10 +104,39 @@
+ 	
+ 	SKYFS_ERROR_1("Cpu compress_time: %lu us, compress_bytes %lu \n", 
+ 			(cpu_compress_time),(cpu_compress_bytes));
++
++
++	SKYFS_ERROR_1("compress summary:\n");
++	if((total_compressed_bytes) >0){
++		compress_rate = (float)(gpu_compress_bytes+cpu_compress_bytes);
++		compress_rate = compress_rate / (float)total_compressed_bytes;
++	}
++	if(gpu_compress_time >0){
++		gpu_cr_bw = (float)gpu_compress_bytes;
++		gpu_cr_bw = (gpu_cr_bw/(float)gpu_compress_time)/1000.0;
++	}
++	
++	if(cpu_compress_time >0){
++		cpu_cr_bw = (float)cpu_compress_bytes;
++		cpu_cr_bw = (cpu_cr_bw/(float)cpu_compress_time)/1000.0;
++	}
++	if(gpu_compress_time + cpu_compress_time >0){
++		all_cr_bw  = (float)cpu_compress_bytes+(float)gpu_compress_bytes;
++		all_cr_bw =  all_cr_bw/((float)cpu_compress_time+(float)gpu_compress_time)/1000.0;
++	}
++	if(gpu_compress_bytes + cpu_compress_bytes > 0){
++		gpu_weight = (float)gpu_compress_bytes;
++		gpu_weight = gpu_weight/( (float)gpu_compress_bytes + (float)cpu_compress_bytes) *100.0;
++	}
++	SKYFS_ERROR_1("compress rate : %f, gpu compress bw: %f GB/s, cpu compress bw: %f GB/s, total compress bw : %f, GPU weight: %f prcent\n",
++			compress_rate, gpu_cr_bw, cpu_cr_bw, all_cr_bw, gpu_weight);
++
++
+ 	gpu_compress_time = 0;
+ 	cpu_compress_time = 0;
+ 	gpu_compress_bytes = 0;
+ 	cpu_compress_bytes = 0;
++	total_compressed_bytes = 0;
+ }
+ 
+ 
+@@ -1711,6 +1750,10 @@
+ 	uint64_t gpu_comp_bw = 0;
+ 	uint64_t cpu_comp_bw = 0;
+ 	uint64_t curr_ratio = 0;
++	
++	if(all_gpu_comp_ratio != 500)
++		return;
++
+ 	if(tmp->gpu_comp_bytes != 0 && tmp->gpu_comp_time != 0)
+ 		gpu_comp_bw = tmp->gpu_comp_bytes / tmp->gpu_comp_time; //MB/s
+ 	if(tmp->cpu_comp_bytes != 0 && tmp->cpu_comp_time)
+@@ -1980,23 +2023,31 @@
+ 					int submit_count = 0;
+ 					int this_submit = 0;
+ 					int over_count = 0;
++					int old_compress_size = 0;
+ 
+ 
+ 					while(submit_count < comp_bufs_count){
+ 						comp_submit_size = 0;
+ 					        this_submit = 0;
++						over_count = 0;
+ 						for(int n = 0 ; n<32; n++ ){
+ 							if((submit_count+n) >= comp_bufs_count){
++								SKYFS_ERROR("count over: comp bufs count : %lu,  submit_count, %lu, index %lu\n",
++										comp_bufs_count, submit_count, n);
+ 								this_submit = n;
+ 								over_count = 1;
+ 								break;
+ 							}
+ 
++
++							old_compress_size = comp_submit_size;
+ 							comp_submit_size += comp_bufs_sizes[submit_count+n];
+ 							if(comp_submit_size > (2*1024*1024)){
++								SKYFS_ERROR("over size: old_comp_size %lu, cur_comp_size %lu , index %d comp_buf_count %lu \n ",
++										old_compress_size, comp_submit_size, n, comp_bufs_count);
+ 								comp_submit_size -= comp_bufs_sizes[submit_count+n];
+ 								this_submit = n;
+-								over_count = 1;
++								over_count = 2;
+ 								break;
+ 							}
+ 							
+@@ -2004,10 +2055,14 @@
+ 						if(!over_count)
+ 							this_submit = 32;
+ 
+-						SKYFS_ERROR("submit_count %d, this_submit %d comp_submit_size %lu\n", 
+-								submit_count, this_submit, comp_submit_size );
+-						if(this_submit == 0)
++						SKYFS_ERROR("submit_count %d, this_submit %d comp_submit_size %ld, start %lu, over_count %d, cpu_comp %d\n", 
++								submit_count, this_submit, comp_submit_size , start, over_count, cpu_compress);
++						if(this_submit == 0){
++							SKYFS_ERROR("compress data[%d] too large %d, comp_bufs_count %d\n",
++									this_submit+submit_count,  comp_bufs_sizes[submit_count+this_submit], comp_bufs_count );
++
+ 							break;
++						}
+ 					   
+ 
+ #if 0	
+@@ -2017,6 +2072,7 @@
+ 						    this_submit = comp_bufs_count - submit_count;
+ #endif
+ 
++
+ 					    rc = __skyfs_C2O_submit_multiple_gpu_compbuf(tmp->ino,
+                 		     		(char * *)&real_comp_bufs_ptrs[submit_count],
+ 						
+@@ -2032,8 +2088,11 @@
+ 						    break;
+ 					    }else{
+ 						    total_rc += rc;
++						    tmp->total_compressed_bytes += comp_submit_size;
++						    total_compressed_bytes += comp_submit_size;
+ 					    }
+ 
++
+ 					    submit_count += this_submit;
+ 					    start += (SKYFS_OBJECT_NODE_SIZE*this_submit);
+ 					    total_changed_space += &cur_changed_space;
+@@ -2160,7 +2219,8 @@
+ 		}
+ 
+ 		gettimeofday(&t1, NULL);
+-		new_compbuf->gpu_comp_ratio = 500; // 50% compressing with CPU, other 50% in GPU
++		//new_compbuf->gpu_comp_ratio = 500; // 50% compressing with CPU, other 50% in GPU
++		new_compbuf->gpu_comp_ratio = all_gpu_comp_ratio; // 50% compressing with CPU, other 50% in GPU
+ 		// set dev_id for all 2 bufs, because other comp_buf_parameters is set to zero by calloc
+ 		for (int n = 0 ; n< 2; n++){
+ 			new_compbuf->bufs[n].dev_id = (new_compbuf->ino+n) % 2;
+Index: client_op.c
+===================================================================
+--- client_op.c	(revision 267)
++++ client_op.c	(working copy)
+@@ -59,6 +59,7 @@
+ #include "client_itm.h"
+ #include "client_ito.h"
+ 
++extern int all_gpu_comp_ratio;
+ 
+ static uint64_t write_num = 0;
+ static uint64_t write_bytes = 0;
+@@ -3034,6 +3035,14 @@
+ 	}
+ 	memcpy(&value[0], pvalue, size);
+ 	value[size] = 0;
++
++	if(!strcmp(name, "All_GPU_Comp_Ratio")){
++		all_gpu_comp_ratio = atoi(pvalue);
++		SKYFS_ERROR_1("Set GPU COMPRESS RATIO %d\n", all_gpu_comp_ratio);
++		rc = 0;
++		return rc;
++	}
++	
+ 	/*find the xattr item to be replaced or created*/
+ 	while(skyfs_xattr_names[index] != NULL){
+  		if(!strcmp(name,skyfs_xattr_names[index])){

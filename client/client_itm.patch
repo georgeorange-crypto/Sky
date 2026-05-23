@@ -1,0 +1,275 @@
+54a55
+> uint64_t setattr_cnt = 0, setattr_time = 0;
+84c85
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+170c171
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+261c262
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+346c347
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+419c420
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+559c560
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+634a636
+>     struct timeval tv, tv1;
+639c641,642
+< 	skyfs_C_meta_t metacache;
+---
+>     skyfs_C_meta_t metacache;
+>     int debug_setattr = 0;
+643a647,648
+>     if(debug_setattr)
+>     	gettimeofday(&tv, NULL);
+672c677
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+678a684
+>     //gettimeofday(&tv, NULL);
+684c690
+< 
+---
+>     
+716a723,856
+>     if(debug_setattr){
+>     	gettimeofday(&tv1, NULL);
+>     	setattr_cnt++;
+>     	setattr_time+=(tv1.tv_usec + 1000000 * tv1.tv_sec);
+>     	setattr_time-=(tv.tv_usec + 1000000 * tv.tv_sec);
+>     	if(setattr_cnt %10000 == 5){
+> 	    SKYFS_ERROR_1("setattr_cnt %llu, setattr_time %llu\n", setattr_cnt, setattr_time);
+>     	}
+> 
+>     }
+> 
+>     return rc;
+> }
+> 
+> skyfs_s32_t __skyfs_C2M_lookup_stat(skyfs_ino_t pino,
+>                 skyfs_s8_t *name,
+>                 skyfs_ino_t *ino,
+>                 skyfs_u32_t *conflict_index,
+> 		struct stat * sbbuf)
+> {
+>     skyfs_s32_t rc = 0;
+>     skyfs_s32_t rc0;
+>     
+>     skyfs_msg_t *msgp = NULL;
+>     amp_request_t *req = NULL;
+> 
+>     skyfs_u32_t    size = 0;
+> 
+>     skyfs_u32_t dir_id;
+>     skyfs_u32_t subset_id = 0;
+>     skyfs_u32_t mds_id;
+>     skyfs_u32_t layout_version;
+> 	
+> 	skyfs_C_meta_t metacache;
+> 
+>     dir_id = __skyfs_C_get_dirid(pino, 0);
+>     subset_id = __sufns_C_get_subsetid(dir_id, name, 0);
+>     mds_id = __skyfs_C_judge_mdsid(dir_id, subset_id);
+> 
+>     SKYFS_ERROR("__skyfs_C2M_lookup:%s:dino:%llu,mds_id:%u,dir_id:%u,subset_id:%u\n", 
+>         name, pino, mds_id, dir_id, subset_id);
+> 
+>     rc = __amp_alloc_request(&req);
+>     if(rc != 0){
+>         SKYFS_ERROR("__skyfs_C2M_lookup:alloc request failed.\n");
+>         goto err_none;
+>     }
+> 
+>     rc = -ENOMEM;
+>     size = AMP_SKYFS_MSGHEAD_SIZE + sizeof(skyfs_m_lookup_args_t);
+>     req->req_msg = (amp_message_t *)malloc(size);
+>     if(!req->req_msg){
+>         SKYFS_ERROR("__skyfs_C2M_lookup:alloc req_msg failed.\n");
+>         goto err_req;
+>     }
+> 
+>     bzero(req->req_msg, size);
+> 
+>     SKYFS_INIT_MSG(msgp, req, SKYFS_FSID, SKYFS_MSG_M_LOOKUP, 
+>         client_this_id, SKYFS_CLIENT, size);
+>     msgp->u.lookupReq.dir_ino = pino;
+>     strcpy(msgp->u.lookupReq.name, name);
+>     SKYFS_FILL_REQ(req, SKYFS_NEED_ACK, AMP_REQUEST | AMP_MSG, size);
+> 
+>     SKYFS_MSG("__skyfs_C2M_lookup: pino=%llu, name=%s.send out\n", pino, name);
+>     rc = amp_send_sync(client_comp_context, req, SKYFS_MDS, mds_id, 1);
+>     SKYFS_MSG("__skyfs_C2M_lookup: pino=%llu, name=%s.receive back\n", 
+> 	    pino, name);
+>     if(rc < 0){
+>         SKYFS_ERROR("__skyfs_C2M_lookup:send failed.rc:%d\n",rc);
+>         goto err_out;
+>     }
+> 
+>     msgp = __skyfs_get_msg(req->req_reply);
+>     
+>     rc = msgp->error;
+>     layout_version = msgp->ver;
+> 
+>     __skyfs_C_judge_mds_layoutv(layout_version, mds_id);
+> 
+>     if (rc > 0) {
+> 	
+> 
+> 	skyfs_meta_t * meta =  &(msgp->u.lookupAck.meta);
+> 	if(meta->type == SKYFS_RENAME){
+> 			SKYFS_ERROR_1("ERROR , GET STAT find ad RENAMED FILE %s\n",name);
+> 			rc = -ENOENT;
+> 			goto err_skip;
+> 	}
+> 
+>         *ino = msgp->u.lookupAck.meta.ino;
+>         *conflict_index = msgp->u.lookupAck.meta.conflict_index;
+> 
+>         SKYFS_MSG("__skyfs_C2M_lookup:ino:%llu,conflict:%u\n", *ino, *conflict_index);
+> 		//metacache funcation 
+> 		rc0 = __skyfs_C_lookup_meta(*ino, *conflict_index, &metacache);
+> 		if(rc0 == 0){
+> 			__skyfs_C_add_meta(*ino, *conflict_index, &(msgp->u.lookupAck.meta));
+> 		}else if(metacache.meta.atime.tv_sec < msgp->u.lookupAck.meta.atime.tv_sec){
+> 			__skyfs_C_update_meta(*ino, *conflict_index, &(msgp->u.lookupAck.meta));
+> 		}
+> 
+> 				sbbuf->st_ino = (ino_t)(meta->ino);
+>    	    	sbbuf->st_size = meta->size;
+>     		sbbuf->st_mode = meta->mode;
+>         	sbbuf->st_nlink = meta->nlink;
+>         	sbbuf->st_uid = meta->uid;
+>         	sbbuf->st_gid = meta->gid;
+>         	sbbuf->st_dev = meta->dev;
+>         	sbbuf->st_atime = (time_t)meta->atime.tv_sec;
+>         	sbbuf->st_mtime = (time_t)meta->mtime.tv_sec;
+>         	sbbuf->st_ctime = (time_t)meta->ctime.tv_sec;
+>    	   	sbbuf->st_blocks = ((skyfs_u64_t)(meta->size) >> 9);
+> 
+>     }
+> 
+> 
+> err_skip:
+>     
+>     if(mds_id != msgp->fromid){
+>         rc0 = __skyfs_C_release_depth(dir_id);
+>         SKYFS_ERROR("__skyfs_C2M_lookup:forward:name:%s,old_mds:%u,new_mds:%u\n",
+>             name, mds_id, msgp->fromid);
+>     }
+> 
+>     free(req->req_reply);
+> err_out:
+>     free(req->req_msg);
+> err_req:
+>     __amp_free_request(req);
+> err_none:
+> 
+>     SKYFS_LEAVE("__skyfs_C2M_lookup:exit:rc:%d\n", rc);
+> 
+719a860
+> 
+764c905
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+815a957,973
+> 
+> void
+> skyfs_C_display_cmetas(skyfs_M_bmeta_t * bmeta, int n)
+> {
+> #ifdef __SHOW_CMETA
+> 	int i = 0;
+> 	//xxx;
+> 	SKYFS_ERROR_1("readdir ret %d, now show all cmetas\n", n);
+> 	for (i = 0; i< SKYFS_MAX_META_PER_BOX ; i++ ){
+> 		SKYFS_ERROR_1("cmeta %d, name %s, ino 0x%llx, uid %d gid %d\n",
+> 				i, bmeta->cmetap[i].name, bmeta->cmetap[i].ino, bmeta->cmetap[i].uid, bmeta->cmetap[i].gid);
+> 
+> 	}
+> #endif
+> 
+> }
+> 
+820c978
+<         skyfs_u64_t offset,
+---
+>         skyfs_u64_t offset, // offset is not used .... mayl
+875c1033
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+908a1067
+> 	skyfs_C_display_cmetas(bmeta, rc);
+967,968c1126,1127
+<         SKYFS_MSG("__skyfs_C_find_bcache:ino:%llu,offset:%d.\n", 
+<             tmp_bcache->ino, tmp_bcache->now_offset);
+---
+>         SKYFS_ERROR("__skyfs_C_find_bcache:ino:%llu,offset:%d.start_offset %lu , search offset %lu\n", 
+>             tmp_bcache->ino, tmp_bcache->now_offset,tmp_bcache->start_offset, offset);
+984,985d1142
+< 
+<        
+994c1151
+< __skyfs_C_release_bcache(skyfs_ino_t ino, struct list_head * bcache_list_head)
+---
+> __skyfs_C_release_bcache(skyfs_ino_t ino, struct list_head * bcache_listhead)
+1157c1314
+<     SKYFS_ENTER("__skyfs_C_compose_bufpage:enter,poff:%d,nfree:%d,index:%d.\n", 
+---
+>     SKYFS_ERROR("__skyfs_C_compose_bufpage:enter,poff:%d,nfree:%d,index:%d.\n", 
+1207c1364,1365
+<                 SKYFS_MSG("__skyfs_C_compose_bufpage:%s,%s,page_offset:%d,%d\n",
+---
+> 		// changed by mayl in 20240322
+>                 SKYFS_ERROR("__skyfs_C_compose_bufpage:%s,page_offset:%d,%d, namelen  %u\n",
+1209c1367
+<                     bcache->cmetap[bmeta_index].name, 
+---
+>                     //bcache->cmetap[bmeta_index].name, 
+1211,1212c1369
+<                     bmeta_index);
+< 
+---
+>                     bmeta_index, dentry->namelen);
+1254d1410
+< 
+1359,1360d1514
+< 
+< 
+1403c1557
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT, size);
+1492c1646
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+1583c1737
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+1677c1831
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+1761c1915
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);
+1824c1978
+<         client_this_id, SKYFS_CLIENT);
+---
+>         client_this_id, SKYFS_CLIENT,size);

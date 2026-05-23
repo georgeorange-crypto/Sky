@@ -1,0 +1,323 @@
+Index: client_cache.c
+===================================================================
+--- client_cache.c	(revision 272)
++++ client_cache.c	(working copy)
+@@ -67,6 +67,7 @@
+ extern void unlock_gpu_init_task(int gtask_index);
+ 
+ int all_gpu_comp_ratio = 500;
++int async_compress = 0;
+ static uint64_t gpu_comp_cnt = 0;
+ uint64_t gpu_comp_init_time = 0;
+ 
+@@ -79,6 +80,7 @@
+ static uint64_t gpu_comp_submit_time = 0;
+ static uint64_t gpu_comp_submit_cnt = 0;
+ static uint64_t total_compressed_bytes= 0;
++static uint64_t total_async_compress_time = 0;
+ 
+ static size_t gpu_write_buf_size = (size_t)(SKYFS_GPU_COMPRESS_BUF_SIZE);
+ static int gpu_compress = 0;
+@@ -129,7 +131,16 @@
+ 	}
+ 	if(gpu_compress_time + cpu_compress_time >0){
+ 		all_cr_bw  = (float)cpu_compress_bytes+(float)gpu_compress_bytes;
+-		all_cr_bw =  all_cr_bw/((float)cpu_compress_time+(float)gpu_compress_time)/1000.0;
++		if(!async_compress){
++			all_cr_bw =  all_cr_bw/((float)cpu_compress_time+(float)gpu_compress_time)/1000.0;
++		}else{
++			if(total_async_compress_time != 0)
++				all_cr_bw =  all_cr_bw/((float)total_async_compress_time)/1000.0;
++			else
++				all_cr_bw = 0;
++
++		}
++
+ 	}
+ 	if(gpu_compress_bytes + cpu_compress_bytes > 0){
+ 		gpu_weight = (float)gpu_compress_bytes;
+@@ -1887,7 +1898,7 @@
+ 				//size_t comp_bufs_count = 0;
+ 				//void * cpu_buf_obj = NULL;
+ 				//size_t * sizes_ptr = & comp_bufs_sizes[0];
+-				struct timeval t1, t2;
++				struct timeval t1, t2, ts, te;
+ 
+ 				struct timeval t3, t4;
+ 				uint64_t Gpu_comp_time = 0;
+@@ -1917,12 +1928,16 @@
+ 				if(tmp->gpu_comp_ratio <=0){
+ 					tmp->gpu_comp_ratio = 1;
+ 				}*/
+-				if(((int)(random()%1000))> tmp->gpu_comp_ratio){
++				if((((int)(random()%1000))> tmp->gpu_comp_ratio) || async_compress){
+ 
+ 
+ 					
+ 					compress_task_t curr_task;
+ 					uint64_t comp_time = 0;
++					int work_group_id = -1;
++					int running_thread_count = 0;
++					int cpu_blk_cnt = 0, gpu_blk_cnt = 0;
++					//int async = 1;
+ 					gettimeofday(&t1,NULL);
+ 					memset(&curr_task, 0, sizeof(compress_task_t));
+ 					curr_task.ino = tmp->ino;
+@@ -1934,28 +1949,85 @@
+ 					curr_task.blk_cnt = SKYFS_GPU_COMPRESS_BUF_SIZE /SKYFS_OBJECT_NODE_SIZE;
+ 					curr_task.compressed_chunk_sizes = &(ret_blk_sizes[0]);
+ 					curr_task.compress_buf_ptrs = &(cpu_comp_buf_ptr[0]);
++
++					if(async_compress){
++						 cpu_blk_cnt = curr_task.blk_cnt * ((int)tmp->gpu_comp_ratio)/1000;
++						 gpu_blk_cnt =  curr_task.blk_cnt - cpu_blk_cnt; 
++						 curr_task.blk_cnt = cpu_blk_cnt;
++					}
++						
+ 					
+ 					
++					
+ 					tmp->comp_op_count++;
+ 
+ 					// CPU compress and multiple submit
+ 
+-					 rc = run_multithead_compress(&curr_task);
+-					 if(rc <0)
++					 if(curr_task.blk_cnt >0){
++					 	rc = run_multithead_compress(&curr_task, async_compress, &work_group_id, &running_thread_count);
++					 }
++					 if(rc <0 && !async_compress)
+ 						 goto submit_end;
+-					gettimeofday(&t2,NULL);
+-					comp_time += (t2.tv_sec*1000000 + t2.tv_usec);
+-					comp_time -= (t1.tv_sec*1000000 + t1.tv_usec);
+-					tmp->cpu_comp_time += comp_time;
+-					tmp->cpu_comp_bytes += SKYFS_GPU_COMPRESS_BUF_SIZE;
++					 if(async_compress){
++						 if(rc <0  && rc != -EBUSY){
++							 SKYFS_ERROR_1("submit async cpu compress faield %d\n", rc);
++							 goto submit_end;
++						 }
++						 if(gpu_blk_cnt > 0){
++							gettimeofday(&ts,NULL);
++							rc = __skyfs_C2O_gpu_compress_bufs(comp_type, 
++							&tmp->bufs[match],
++							tmp->bufs[match].buf+(cpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE), 
++							//(gpu_write_buf_size),
++							(gpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE),
++							&comp_bufs_count, // comp_count
++					       		&sizes_ptr,
++							&comp_bufs_ptrs
++							);
++							gettimeofday(&te,NULL); // te -ts is gpu compress_time
++							Gpu_comp_time += (te.tv_sec*1000000 + te.tv_usec);
++							Gpu_comp_time -= (ts.tv_sec*1000000 + ts.tv_usec);
++							gpu_comp_cnt ++;
++							tmp->gpu_comp_time += Gpu_comp_time;
++							tmp->gpu_comp_bytes += (gpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE);
++							gpu_compress_time += Gpu_comp_time;
++							gpu_compress_bytes += (gpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE);
++
++						 }
++						 if(cpu_blk_cnt >0){
++							 //TODO: wait for cpu compress complete
++							 rc = sync_compress_tasks(&curr_task, work_group_id, running_thread_count);
++							 tmp->cpu_comp_time += curr_task.run_time;
++							 tmp->cpu_comp_bytes += (cpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE);
++							 cpu_compress_time += curr_task.run_time;
++							 cpu_compress_bytes += (cpu_blk_cnt*SKYFS_OBJECT_NODE_SIZE);
++						 }
++						
++						 gettimeofday(&t2,NULL);
++						comp_time += (t2.tv_sec*1000000 + t2.tv_usec);
++						comp_time -= (t1.tv_sec*1000000 + t1.tv_usec);
++						total_async_compress_time += comp_time;
++						// TODO : merge CPU and GPU compressed data for submiting to server side.
++						
++
++
++					 }
++					 
++					if(!async_compress){
++						gettimeofday(&t2,NULL);
++						comp_time += (t2.tv_sec*1000000 + t2.tv_usec);
++						comp_time -= (t1.tv_sec*1000000 + t1.tv_usec);
++						tmp->cpu_comp_time += comp_time;
++						tmp->cpu_comp_bytes += SKYFS_GPU_COMPRESS_BUF_SIZE;
+ 					
+-					cpu_compress_time += comp_time;
+-					cpu_compress_bytes += SKYFS_GPU_COMPRESS_BUF_SIZE;
+-					SKYFS_ERROR("CPu compress %lu us,  %lu bytes\n",
++						cpu_compress_time += comp_time;
++						cpu_compress_bytes += SKYFS_GPU_COMPRESS_BUF_SIZE;
++						SKYFS_ERROR("CPu compress %lu us,  %lu bytes\n",
+ 							cpu_compress_time, cpu_compress_bytes);
+-
+-					 cpu_compress = 1;
+-					 comp_bufs_count = rc;
++					 	cpu_compress = 1;
++					 	comp_bufs_count = rc;
++					}
++					
+ 					 // TODO : multiple submit
+ 					 					 
+ 
+Index: client_compress_thread.c
+===================================================================
+--- client_compress_thread.c	(revision 272)
++++ client_compress_thread.c	(working copy)
+@@ -76,6 +76,8 @@
+    int op_type = 0;
+    char * compress_ptr = NULL;
+    char * uncompress_ptr = NULL;
++   struct timeval tv1, tv2;
++   //uint64_t durtime = 0;
+ 
+ 
+     while (1) {
+@@ -102,6 +104,8 @@
+ 		size_t uncompress_len = this_task->uncompress_blk_size;
+ 
+ 		//fprintf(stderr, "start  to run task_id   %d, op %d\n", task_idx, op_type);
++		//gettimeofday(&tv1, NULL);
++		//this_task->start_time  = tv1.tv_sec * 1000000 + tv1.tv_usec;
+ 		while(compressed_blk_cnt < this_task->blk_cnt){
+ 			this_task->compressed_chunk_sizes[compressed_blk_cnt] = 0;
+ 			compress_ret_len = ZSTD_compress(compress_ptr, compress_len, 
+@@ -118,7 +122,12 @@
+ 			compress_ptr += compress_len;
+ 
+ 		}
++		gettimeofday(&tv2, NULL);
++		this_task->end_time  = tv2.tv_sec * 1000000 + tv2.tv_usec;
+ 		this_task->complete_blks = compressed_blk_cnt;
++		//durtime = tv2.tv_sec * 1000000 + tv2.tv_usec;
++		//durtime -= (tv1.tv_sec * 1000000 + tv1.tv_usec);
++
+ 		//fprintf(stderr, "end  to run task_id   %d, op %d\n", task_idx, op_type);
+ 
+ 
+@@ -126,6 +135,7 @@
+ 	}
+         //printf("Thread %ld finished task\n", (long)arg);
+         // 触发完成信号量
++	//this_task->run_time = durtime;
+         sem_post(&done_sem[task_idx]);
+     }
+     return NULL;
+@@ -163,7 +173,7 @@
+ 	
+ }
+ 
+-int  run_multithead_compress(compress_task_t * comp_task)
++int  run_multithead_compress(compress_task_t * comp_task, int async, int * work_group_idx, int * running_thread_cnt)
+ {
+ 	// 确定压缩工作组
+ 	int work_group_id = random() % COMP_NUM_TASKS;
+@@ -177,6 +187,8 @@
+ 	int x = 0;
+ 	int rc = 0;
+ 	int complete_tasks = 0;
++	struct timeval tv1;
++	uint64_t task_start_time;
+ 	
+ 
+ 	if(tasks_per_thread == 0){
+@@ -188,6 +200,9 @@
+ 
+ 	// 设置所有参数到各个压缩线程
+ 	// 1 获取线程组锁
++	gettimeofday(&tv1, NULL);
++	comp_task->start_time = tv1.tv_sec * 1000000 + tv1.tv_usec; 
++	
+ 	pthread_mutex_lock(&(compress_task_mutex_locks[work_group_id]));
+ 	// 2 设置参数
+ 	compress_ptr = comp_task->compress_buf;
+@@ -235,6 +250,12 @@
+ 	for(int i = 0; i<n; i++){
+         	sem_post(&task_sem[start_worker_id]+i);
+ 	}
++	if(async){
++		rc = -EBUSY; 
++		*work_group_idx = work_group_id;
++		*running_thread_cnt = n;
++		goto compress_done;
++	}
+ 	// 4 等待结束信号量
+ 	//fprintf(stderr, "wait semphores to group , start by %d\n", start_worker_id);
+ 	for(int j = 0; j<n; j++){
+@@ -246,7 +267,9 @@
+ 	//fprintf(stderr, "wait semphores to group , start by %d, Done\n", start_worker_id);
+ 	// 释放工作组锁
+ 	pthread_mutex_unlock(&(compress_task_mutex_locks[work_group_id]));
+-	if(rc < comp_task->blk_cnt){
++
++ compress_done:
++	if(rc < comp_task->blk_cnt && !async){
+ 		fprintf(stderr, "compress error ! try to compress %d blks , complete %d\n",
+ 				comp_task->blk_cnt, rc);
+ 		rc = -EIO;
+@@ -255,6 +278,36 @@
+ 
+ 	
+ }
++
++int sync_compress_tasks(compress_task_t * comp_task,int work_group_id, int task_cnt)
++{
++	
++	int complete_blks_cnt = 0;
++	compress_task_t * cur_comp_task = NULL;
++	int start_worker_id = work_group_id *(COMP_NUM_THREADS / COMP_NUM_TASKS);
++	uint64_t end_time = 0;
++	//uint64_t start_time = 0xffffffffffffffff;
++	for(int j = 0 ; j<task_cnt; j++){
++        	sem_wait(&done_sem[start_worker_id]+j);
++		cur_comp_task =  &comp_tasks[start_worker_id+j];
++		/*
++		if(start_time > cur_comp_task->start_time){
++			start_time = cur_comp_task->start_time;
++		}*/
++
++		if(end_time < cur_comp_task->end_time){
++			end_time = cur_comp_task->end_time;
++		}
++
++		complete_blks_cnt += cur_comp_task->complete_blks; 
++	}
++	
++	pthread_mutex_unlock(&(compress_task_mutex_locks[work_group_id]));
++	comp_task->run_time = end_time - comp_task->start_time;
++	return complete_blks_cnt;
++	
++}
++
+ #if 0
+ int main() {
+     pthread_t threads[NUM_THREADS];
+Index: client_op.c
+===================================================================
+--- client_op.c	(revision 268)
++++ client_op.c	(working copy)
+@@ -60,6 +60,7 @@
+ #include "client_ito.h"
+ 
+ extern int all_gpu_comp_ratio;
++extern int async_compress;
+ 
+ static uint64_t write_num = 0;
+ static uint64_t write_bytes = 0;
+@@ -3042,6 +3043,14 @@
+ 		rc = 0;
+ 		return rc;
+ 	}
++
++
++	if(!strcmp(name, "Async_compress")){
++		all_gpu_comp_ratio = atoi(pvalue);
++		SKYFS_ERROR_1("Set Async_compress  %d\n", async_compress);
++		rc = 0;
++		return rc;
++	}
+ 	
+ 	/*find the xattr item to be replaced or created*/
+ 	while(skyfs_xattr_names[index] != NULL){

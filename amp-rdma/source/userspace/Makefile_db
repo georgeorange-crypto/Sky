@@ -1,0 +1,32 @@
+
+CC = cc
+RM = rm -f
+AR = ar rvs
+MV = mv -f
+RANLIB = ranlib
+CFLAGS = -I../../include/   -g -Wall 
+LDFLAGS = -lm -lpthread 
+LIBPATH = ../../lib/
+
+LDDINC := $(shell pwd)
+INC_PUB  := $(LDDINC)/../../../include
+EXTRA_CFLAGS	+= -I$(INC_PUB)
+#EXTRA_CFLAGS	+= -D__AMP_LISTEN_SELECT
+EXTRA_CFLAGS	+= -D__AMP_LISTEN_POLL
+#EXTRA_CFLAGS	+= -D__AMP_LISTEN_EPOLL
+
+OBJS = amp_interface.o amp_conn.o amp_utcp.o amp_protos.o amp_request.o \
+       amp_uthread.o amp_help.o 
+LIB = libamp.a
+
+.c.o:
+	${CC} ${CFLAGS} ${EXTRA_CFLAGS}  -c $*.c
+
+
+lib: ${OBJS}
+	${AR} ${LIB} ${OBJS}
+	${RANLIB} ${LIB}
+	${MV} ${LIB} ${LIBPATH}
+
+clean:
+	${RM} *.o core ~* *.cpp libamp.a

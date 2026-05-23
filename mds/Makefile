@@ -1,0 +1,64 @@
+LDDINC := $(shell pwd)
+INC_CLI := $(LDDINC)
+INC_PUB  := $(LDDINC)/../include
+INC_COM  := $(LDDINC)/../amp-rdma/include
+EXTRA_CFLAGS	+= -I$(INC_CLI) -I$(INC_PUB) -I$(INC_COM) -D__AMP_RDMA__
+EXTRA_CFLAGS	+= -O2 -g -Wall 
+#EXTRA_CFLAGS	+= -DSEND_P
+#EXTRA_CFLAGS	+= -DCREATE_P
+#EXTRA_CFLAGS	+= -DREMOVE_P
+#EXTRA_CFLAGS	+= -DLOOKUP_P
+#EXTRA_CFLAGS	+= -DREAD_P
+#EXTRA_CFLAGS	+= -DHASH_P
+#EXTRA_CFLAGS	+= -DPROFILING
+EXTRA_CFLAGS	+= -D_GNU_SOURCE -D_AMP_RDMA
+#EXTRA_CFLAGS	+= -D__SKYFS_LOG__
+#EXTRA_CFLAGS	+= -D__SKYFS_DEBUG__
+#EXTRA_CFLAGS	+= -DSKYFS_DISTRECTE
+#EXTRA_CFLAGS	+= -D__MPS_PROF__
+#EXTRA_CFLAGS	+= -DMPS_PROFILE
+#EXTRA_CFLAGS	+= -DMPS_PREFETCH
+
+LDPATH_AMP = ${INC_COM}/../lib/
+LIBNAME_AMP = amp-rdma
+LDFLAGS_AMP = -L${LDPATH_AMP} -l${LIBNAME_AMP}  -libverbs -lrdmacm -D__AMP__RDMA__
+
+LDFLAGS = -lm -lpthread
+
+
+CC = cc
+CP = cp
+RM = rm -f
+AR = ar rvs
+MV = mv -f
+
+EXE_FILES = mds 
+
+OBJS =	mds.o	\
+	mds_init.o	\
+	mds_thread.o	\
+	mds_flock.o	\
+	mds_op.o	\
+	mds_cache.o	\
+	mds_meta.o	\
+	mds_help.o	\
+	mds_log.o	\
+	mds_layout.o	\
+	mds_ito.o	\
+	mds_itm.o	\
+	mds_loadb.o	\
+	mds_state.o 
+
+#LIB = libcom.a
+.c.o:
+	${CC}  ${EXTRA_CFLAGS}  -c $*.c
+
+mds: ${OBJS}
+	${CC}  -O2 -g -o $@ ${OBJS} ${LDFLAGS} ${LDFLAGS_AMP}
+	cp mds ../bin
+	cp mds /cluster/skyfs/bin
+	cp mds /cluster/skyfs/bin/skyfs_mds
+
+#scp mds xingjing@a250:/home/xingjing/sunfs/bin
+clean:
+	${RM} *.o core ~* ${EXE_FILES} 

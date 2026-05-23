@@ -1,0 +1,54 @@
+Index: client_op.c
+===================================================================
+--- client_op.c	(revision 273)
++++ client_op.c	(working copy)
+@@ -60,6 +60,7 @@
+ #include "client_ito.h"
+ 
+ extern int all_gpu_comp_ratio;
++extern int enable_prop;
+ 
+ static uint64_t write_num = 0;
+ static uint64_t write_bytes = 0;
+@@ -979,7 +980,7 @@
+     int64_t  clean_changed_space = 0;
+     uint64_t tmp_clean_rc = 0;
+     int64_t tmp_changed_space = 0;
+-
++#if 0
+     do{	    
+ 	    tmp_clean_rc = __skyfs_C_clean_submit_ino_gpu_write_bufs(ino ,  &tmp_changed_space);
+ 	    if(tmp_clean_rc <0){
+@@ -992,7 +993,7 @@
+ 	    clean_rc += tmp_clean_rc;
+ 	    clean_changed_space += tmp_changed_space;
+     }while(0);  
+-
++#endif
+     bzero(&args, sizeof(skyfs_m_setmeta_args_t));
+     // now clear meta cache
+     args.valid = SKYFS_ATTR_SIZE | SKYFS_ATTR_CTIME;
+@@ -2297,7 +2298,7 @@
+ 		struct timeval tv;
+ 		uint64_t stime;
+ 
+-	   	SKYFS_ERROR("skyfs_write: Begin write:client writebuf num:%d\n", client_writebuf_num);
++	   	SKYFS_ERROR_1("skyfs_write: offset %llu , size %lu\n", offset, size);
+ 		if(size == 32768 && strstr(path, "base") ){
+ 			char pattern [128];
+ 			memset(pattern, 0, 128);
+@@ -3042,6 +3043,14 @@
+ 		rc = 0;
+ 		return rc;
+ 	}
++
++	if(!strcmp(name, "Enable_prop")){
++		enable_prop = atoi(pvalue);
++		SKYFS_ERROR_1("Set Do_prop %d \n", enable_prop);
++		rc = 0;
++		return rc;
++	}
++
+ 	
+ 	/*find the xattr item to be replaced or created*/
+ 	while(skyfs_xattr_names[index] != NULL){
